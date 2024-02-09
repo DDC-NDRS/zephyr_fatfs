@@ -37,7 +37,11 @@ extern "C" {
 
 #if defined(_WIN32)		/* Windows VC++ (for development only) */
 #define FF_INTDEF 2
-#include <windows.h>
+#if (__GTEST == 1U)
+#define _TCHAR_DEFINED  // #CUSTOM@NDRS
+#endif
+#include <minwindef.h>
+
 typedef unsigned __int64 QWORD;
 #include <float.h>
 #define isnan(v) _isnan(v)
