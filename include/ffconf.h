@@ -57,8 +57,8 @@
 
 
 #define FF_USE_STRFUNC	0
-#define FF_PRINT_LLI	1
-#define FF_PRINT_FLOAT	1
+#define FF_PRINT_LLI	0
+#define FF_PRINT_FLOAT	0
 #define FF_STRF_ENCODE	3
 /* FF_USE_STRFUNC switches the string API functions, f_gets(), f_putc(), f_puts()
 /  and f_printf().
@@ -289,6 +289,12 @@
 /      must be added to the project. Samples are available in ffsystem.c.
 /
 /  The FF_FS_TIMEOUT defines timeout period in unit of O/S time tick.
+*/
+
+/* Zephyr specific configuration override */
+/* The ZEPHYR_CONFIG_OVERRIDE should be given header file name that will contain
+/  series of undefs and redefinitions of the FF_ identifiers from the ffconf.h
+/  it needs to override
 */
 #ifdef ZEPHYR_CONFIG_OVERRIDE
 #define FFCONF_STRINGIZE_AGAIN(x) #x
