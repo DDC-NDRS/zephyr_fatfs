@@ -189,7 +189,12 @@ typedef struct {
 	FFXCWDS	xcwds2;		/* Working buffer to follow the path */
 #endif
 #endif
-	BYTE	win[FF_MAX_SS];	/* Disk access window for directory, FAT (and file data in tiny cfg) */
+	/* Disk access window for Directory, FAT (and file data at tiny cfg) */
+#if (__GTEST == 1U) /* #CUSTOM@NDRS */
+	BYTE    win[FF_MAX_SS];
+#else
+	BYTE    win[FF_MAX_SS] __attribute__((aligned(FS_FATFS_WINDOW_ALIGNMENT)));
+#endif
 } FATFS;
 
 
