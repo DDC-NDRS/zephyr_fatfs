@@ -38,7 +38,7 @@ extern "C" {
 
 #if defined(_WIN32)		/* Windows VC++ (for development only) */
 #define FF_INTDEF 2
-#if (__GTEST == 1U)
+#if (__GTEST == 1)
 #define _TCHAR_DEFINED  // #CUSTOM@NDRS
 #endif
 #include <minwindef.h>
@@ -190,7 +190,7 @@ typedef struct {
 #endif
 #endif
 	/* Disk access window for Directory, FAT (and file data at tiny cfg) */
-#if (__GTEST == 1U) /* #CUSTOM@NDRS */
+#if (__GTEST == 1) /* #CUSTOM@NDRS */
 	BYTE    win[FF_MAX_SS];
 #else
 	BYTE    win[FF_MAX_SS] __attribute__((aligned(FS_FATFS_WINDOW_ALIGNMENT)));

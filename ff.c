@@ -1,5 +1,5 @@
 /*----------------------------------------------------------------------------/
-/  FatFs - Generic FAT Filesystem Module  R0.16                               /
+/  FatFs - Generic FAT Filesystem Module  R0.16 w/patch 2                     /
 /-----------------------------------------------------------------------------/
 /
 / Copyright (C) 2025, ChaN, all right reserved.
@@ -41,6 +41,9 @@
 #define MAX_FAT16	0xFFF5			/* Max FAT16 clusters (differs from specs, but right for real DOS/Windows behavior) */
 #define MAX_FAT32	0x0FFFFFF5		/* Max FAT32 clusters (not defined in specs, practical limit) */
 #define MAX_EXFAT	0x7FFFFFFD		/* Max exFAT clusters (differs from specs, implementation limit) */
+#define MIN_EXFAT	0x00000100		/* Min exFAT clusters (Not defined in specs, implementation limit) */
+#define MIN_FAT12	32				/* Min FAT12 clusters (Not defined in specs, implementation limit) */
+#define MIN_VOLUME	64				/* Min volume sectors (Not defined in specs, implementation limit) */
 
 
 /* Character code support macros */
@@ -3392,7 +3395,7 @@ static UINT check_fs (	/* 0:FAT/FAT32 VBR, 1:exFAT VBR, 2:Not FAT and valid BS, 
 			&& ld_16(fs->win + BPB_RsvdSecCnt) != 0		/* Properness of number of reserved sectors (MNBZ) */
 			&& (UINT)fs->win[BPB_NumFATs] - 1 <= 1		/* Properness of number of FATs (1 or 2) */
 			&& ld_16(fs->win + BPB_RootEntCnt) != 0		/* Properness of root dir size (MNBZ) */
-			&& (ld_16(fs->win + BPB_TotSec16) >= 128 || ld_32(fs->win + BPB_TotSec32) >= 0x10000)	/* Properness of volume size (>=128) */
+			&& (ld_16(fs->win + BPB_TotSec16) >= MIN_VOLUME || ld_32(fs->win + BPB_TotSec32) >= 0x10000)	/* Properness of volume size */
 			&& ld_16(fs->win + BPB_FATSz16) != 0) {		/* Properness of FAT size (MNBZ) */
 				return 0;	/* It can be presumed an FAT VBR */
 		}
@@ -3545,7 +3548,7 @@ static FRESULT mount_volume (	/* FR_OK(0): successful, !=0: an error occurred */
 		if (fs->csize == 0)	return FR_NO_FILESYSTEM;	/* (Must be 1..32768 sectors) */
 
 		ncl = ld_32(fs->win + BPB_NumClusEx);			/* Number of clusters */
-		if (ncl > MAX_EXFAT) return FR_NO_FILESYSTEM;	/* (Too many clusters) */
+		if (ncl < MIN_EXFAT || ncl > MAX_EXFAT) return FR_NO_FILESYSTEM;	/* (Wrong cluster count) */
 		fs->n_fatent = ncl + 2;
 
 		/* Boundaries and Limits */
@@ -3590,6 +3593,7 @@ static FRESULT mount_volume (	/* FR_OK(0): successful, !=0: an error occurred */
 
 		fasize = ld_16(fs->win + BPB_FATSz16);		/* Number of sectors per FAT */
 		if (fasize == 0) fasize = ld_32(fs->win + BPB_FATSz32);
+		if (fasize >= 0x200000) return FR_NO_FILESYSTEM;	/* (Must be smaller than max FAT size) */
 		fs->fsize = fasize;
 
 		fs->n_fats = fs->win[BPB_NumFATs];				/* Number of FATs */
@@ -3617,6 +3621,7 @@ static FRESULT mount_volume (	/* FR_OK(0): successful, !=0: an error occurred */
 		if (nclst <= MAX_FAT32) fmt = FS_FAT32;
 		if (nclst <= MAX_FAT16) fmt = FS_FAT16;
 		if (nclst <= MAX_FAT12) fmt = FS_FAT12;
+		if (nclst <= MIN_FAT12) fmt = 0;
 		if (fmt == 0) return FR_NO_FILESYSTEM;
 
 		/* Boundaries and Limits */
@@ -4048,11 +4053,11 @@ FRESULT f_read (
 				if (disk_read(fs->pdrv, rbuff, sect, cc) != RES_OK) ABORT(fs, FR_DISK_ERR);
 #if !FF_FS_READONLY && FF_FS_MINIMIZE <= 2		/* Replace one of the read sectors with cached data if it contains a dirty sector */
 #if FF_FS_TINY
-				if (fs->wflag && fs->winsect - sect < cc) {
+				if (fs->wflag && fs->winsect >= sect && fs->winsect - sect < cc) {	/* Explicit range check, not relying on unsigned wrap [CVE-2026-6685] */
 					memcpy(rbuff + ((fs->winsect - sect) * SS(fs)), fs->win, SS(fs));
 				}
 #else
-				if ((fp->flag & FA_DIRTY) && fp->sect - sect < cc) {
+				if ((fp->flag & FA_DIRTY) && fp->sect >= sect && fp->sect - sect < cc) {	/* Explicit range check, not relying on unsigned wrap [CVE-2026-6685] */
 					memcpy(rbuff + ((fp->sect - sect) * SS(fs)), fp->buf, SS(fs));
 				}
 #endif
@@ -4163,12 +4168,12 @@ FRESULT f_write (
 				if (disk_write(fs->pdrv, wbuff, sect, cc) != RES_OK) ABORT(fs, FR_DISK_ERR);
 #if FF_FS_MINIMIZE <= 2
 #if FF_FS_TINY
-				if (fs->winsect - sect < cc) {	/* Refill sector cache if it gets invalidated by the direct write */
+				if (fs->winsect >= sect && fs->winsect - sect < cc) {	/* Refill sector cache if invalidated by the direct write; explicit range check [CVE-2026-6685] */
 					memcpy(fs->win, wbuff + ((fs->winsect - sect) * SS(fs)), SS(fs));
 					fs->wflag = 0;
 				}
 #else
-				if (fp->sect - sect < cc) { /* Refill sector cache if it gets invalidated by the direct write */
+				if (fp->sect >= sect && fp->sect - sect < cc) { /* Refill sector cache if invalidated by the direct write; explicit range check [CVE-2026-6685] */
 					memcpy(fp->buf, wbuff + ((fp->sect - sect) * SS(fs)), SS(fs));
 					fp->flag &= (BYTE)~FA_DIRTY;
 				}
@@ -4548,6 +4553,73 @@ FRESULT f_getcwd (
 
 
 #if FF_FS_MINIMIZE <= 2
+#if !FF_FS_READONLY
+/*-----------------------------------------------------------------------*/
+/* Zero a newly exposed region of a file                                 */
+/*-----------------------------------------------------------------------*/
+/* Fill file data bytes [start, end) with zeros so that growing a file with   */
+/* f_lseek() never lets a later f_read() return residual on-disk data         */
+/* (CVE-2026-6686). The cluster chain covering the range must already be       */
+/* allocated. Bytes outside [start, end) within a boundary sector are kept.    */
+
+static FRESULT fill_zero (
+	FIL* fp,		/* Open file object */
+	FSIZE_t start,	/* First byte to clear */
+	FSIZE_t end		/* One past the last byte to clear */
+)
+{
+	FATFS *fs = fp->obj.fs;
+	DWORD clst, csz, skip;
+	LBA_t sect;
+	FSIZE_t pos;
+	UINT off, cnt;
+
+	if (start >= end) return FR_OK;
+	csz = (DWORD)fs->csize * SS(fs);				/* Cluster size (byte) */
+
+	clst = fp->obj.sclust;							/* Follow the chain to the cluster holding `start` */
+	if (clst < 2 || clst >= fs->n_fatent) return FR_INT_ERR;
+	for (skip = (DWORD)(start / csz); skip != 0; skip--) {
+		clst = get_fat(&fp->obj, clst);
+		if (clst == 0xFFFFFFFF) return FR_DISK_ERR;
+		if (clst < 2 || clst >= fs->n_fatent) return FR_INT_ERR;
+	}
+
+	for (pos = start; pos < end; ) {
+		sect = clst2sect(fs, clst) + (UINT)((pos / SS(fs)) & (fs->csize - 1));	/* Sector holding `pos` */
+		if (sect == 0) return FR_INT_ERR;
+		off = (UINT)(pos % SS(fs));					/* Offset in the sector */
+		cnt = SS(fs) - off;							/* Bytes to clear in this sector */
+		if ((FSIZE_t)cnt > end - pos) cnt = (UINT)(end - pos);
+#if FF_FS_TINY
+		if (move_window(fs, sect) != FR_OK) return FR_DISK_ERR;
+		memset(fs->win + off, 0, cnt);
+		fs->wflag = 1;
+#else
+		if (fp->sect != sect) {						/* Bring the sector into the file cache */
+			if (fp->flag & FA_DIRTY) {				/* Write back a dirty cache first */
+				if (disk_write(fs->pdrv, fp->buf, fp->sect, 1) != RES_OK) return FR_DISK_ERR;
+				fp->flag &= (BYTE)~FA_DIRTY;
+			}
+			if ((off != 0 || cnt != SS(fs))			/* Preserve neighbouring bytes of a partial sector */
+				&& disk_read(fs->pdrv, fp->buf, sect, 1) != RES_OK) return FR_DISK_ERR;
+			fp->sect = sect;
+		}
+		memset(fp->buf + off, 0, cnt);
+		fp->flag |= FA_DIRTY;
+#endif
+		pos += cnt;
+		if (pos < end && (pos % csz) == 0) {		/* Step to the next cluster at a boundary */
+			clst = get_fat(&fp->obj, clst);
+			if (clst == 0xFFFFFFFF) return FR_DISK_ERR;
+			if (clst < 2 || clst >= fs->n_fatent) return FR_INT_ERR;
+		}
+	}
+	return FR_OK;
+}
+#endif	/* !FF_FS_READONLY */
+
+
 /*-----------------------------------------------------------------------*/
 /* API: Seek File Read/Write Pointer                                     */
 /*-----------------------------------------------------------------------*/
@@ -4631,6 +4703,7 @@ FRESULT f_lseek (
 
 	/* Normal Seek */
 	{
+		FSIZE_t oldsize = fp->obj.objsize;	/* File size before this seek, for zero-fill on extend [CVE-2026-6686] */
 #if FF_FS_EXFAT
 		if (fs->fs_type != FS_EXFAT && ofs >= 0x100000000) ofs = 0xFFFFFFFF;	/* Clip at 4 GiB - 1 if at FATxx */
 #endif
@@ -4688,10 +4761,13 @@ FRESULT f_lseek (
 				}
 			}
 		}
-		if (!FF_FS_READONLY && fp->fptr > fp->obj.objsize) {	/* Set file change flag if the file size is extended */
-			fp->obj.objsize = fp->fptr;
+#if !FF_FS_READONLY
+		if (fp->fptr > oldsize) {	/* File size extended (implies FA_WRITE, as ofs is clipped to objsize otherwise) */
+			if (fill_zero(fp, oldsize, fp->fptr) != FR_OK) ABORT(fs, FR_DISK_ERR);	/* Zero the newly exposed range so f_read cannot disclose residual on-disk data [CVE-2026-6686] */
+			fp->obj.objsize = fp->fptr;	/* Set file change flag if the file size is extended */
 			fp->flag |= FA_MODIFIED;
 		}
+#endif
 		if (fp->fptr % SS(fs) && nsect != fp->sect) {	/* Fill sector cache if needed */
 #if !FF_FS_TINY
 #if !FF_FS_READONLY
@@ -5526,7 +5602,7 @@ FRESULT f_getlabel (
 					WCHAR hs;
 					UINT nw;
 
-					for (si = di = hs = 0; si < dj.dir[XDIR_NumLabel]; si++) {	/* Extract volume label from 83 entry */
+					for (si = di = hs = 0; si < dj.dir[XDIR_NumLabel] && si < 11; si++) {	/* Extract volume label from 83 entry */
 						wc = ld_16(dj.dir + XDIR_Label + si * 2);
 						if (hs == 0 && IsSurrogate(wc)) {	/* Is the code a surrogate? */
 							hs = wc; continue;
@@ -6157,7 +6233,7 @@ FRESULT f_mkfs (
 			}
 		}
 	}
-	if (sz_vol < 128) LEAVE_MKFS(FR_MKFS_ABORTED);	/* Check if volume size is >=128 sectors */
+	if (sz_vol < MIN_VOLUME) LEAVE_MKFS(FR_MKFS_ABORTED);	/* Check if volume size is not too small */
 
 	/* Now start to create an FAT volume at b_vol and sz_vol */
 
@@ -6389,7 +6465,8 @@ FRESULT f_mkfs (
 			}
 
 			/* Determine number of clusters and final check of validity of the FAT sub-type */
-			if (sz_vol < b_data + pau * 16 - b_vol) LEAVE_MKFS(FR_MKFS_ABORTED);	/* Too small volume? */
+			if (sz_vol < b_data + pau * MIN_FAT12 - b_vol) LEAVE_MKFS(FR_MKFS_ABORTED);	/* Too small volume for this configuration? */
+
 			n_clst = ((DWORD)sz_vol - sz_rsv - sz_fat * n_fat - sz_dir) / pau;
 			if (fsty == FS_FAT32) {
 				if (n_clst <= MAX_FAT16) {	/* Too few clusters for FAT32? */
